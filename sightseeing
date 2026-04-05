@@ -1,0 +1,657 @@
+-- sightseeing v7.0
+-- camera/spectate only (no orbit, no visuals, no prediction, no movement)
+-- free/lock/chase are based on the selected target (st), not you
+-- note: roblox api identifiers (GetService, Enum.KeyCode, etc) are case-sensitive
+
+if _G.sightseeingcleanup then pcall(_G.sightseeingcleanup) task.wait(0.25) end
+
+--// services
+local function safegetservice(name)
+	local ok, svc = pcall(game.GetService, game, name)
+	return ok and svc or nil
+end
+
+local rs   = safegetservice("RunService")
+local plrs = safegetservice("Players")
+local uis  = safegetservice("UserInputService")
+local ws   = safegetservice("Workspace") or workspace
+
+if not rs or not plrs or not uis then
+	warn("[sightseeing] critical services unavailable, aborting.")
+	return
+end
+
+local cam = ws.CurrentCamera
+local lp = plrs.LocalPlayer or (plrs:GetPropertyChangedSignal("LocalPlayer"):Wait() and plrs.LocalPlayer)
+
+--// helpers
+local v3, cf = Vector3.new, CFrame.new
+local clamp, exp, mn, mx = math.clamp, math.exp, math.min, math.max
+local tk = tick or os.clock
+local zv3 = v3(0,0,0)
+
+local function safeprop(inst, prop)
+	local ok, val = pcall(function() return inst[prop] end)
+	return ok and val or nil
+end
+
+local function safev3(v)
+	if typeof(v) ~= "Vector3" then return zv3 end
+	if v.X ~= v.X or v.Y ~= v.Y or v.Z ~= v.Z then return zv3 end
+	return v3(clamp(v.X,-1e6,1e6), clamp(v.Y,-1e6,1e6), clamp(v.Z,-1e6,1e6))
+end
+
+local function lerp(a,b,t) return a + (b-a) * clamp(t,0,1) end
+local function lerpv3(a,b,t)
+	t = clamp(t,0,1)
+	return v3(lerp(a.X,b.X,t), lerp(a.Y,b.Y,t), lerp(a.Z,b.Z,t))
+end
+
+local function dampv3(c,g,sp,dt)
+	return lerpv3(c, g, 1 - exp(-sp * dt * 12))
+end
+
+local function validchr(c)
+	if not c then return false end
+	local ok, parent = pcall(function() return c.Parent end)
+	return ok and parent ~= nil
+end
+
+local function gethum(c)
+	if not validchr(c) then return nil end
+	local ok, h = pcall(function() return c:FindFirstChildOfClass("Humanoid") end)
+	return ok and h or nil
+end
+
+local function getroot(c)
+	if not validchr(c) then return nil end
+	local ok, r = pcall(function()
+		return c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("Torso")
+	end)
+	return ok and r or nil
+end
+
+local function isalive(p)
+	if not p then return false end
+	local chr = safeprop(p, "Character")
+	if not validchr(chr) then return false end
+	local hum = gethum(chr)
+	if not hum then return false end
+	local hp = safeprop(hum, "Health")
+	return hp and hp > 0
+end
+
+-- local death/cutscene guard (kept: prevents death-counter camera bugs)
+local function islocalplayerincutscene()
+	local chr = safeprop(lp, "Character")
+	if not validchr(chr) then return true end
+	local hum = gethum(chr)
+	if not hum then return true end
+	local hp = safeprop(hum, "Health")
+	if not hp or hp <= 0 then return true end
+	return false
+end
+
+local function notify(title, text, dur)
+	local sg = safegetservice("StarterGui")
+	if sg then
+		pcall(sg.SetCore, sg, "SendNotification", {
+			Title = tostring(title or "sightseeing"),
+			Text = tostring(text or ""),
+			Duration = tonumber(dur) or 3,
+		})
+	end
+end
+
+--// connections
+local cn = {}
+local function hook(c)
+	if c and typeof(c) == "RBXScriptConnection" then
+		cn[#cn+1] = c
+	end
+	return c
+end
+
+local function unhookall()
+	for i = #cn, 1, -1 do
+		local c = cn[i]
+		cn[i] = nil
+		if c then pcall(function() if c.Connected then c:Disconnect() end end) end
+	end
+end
+
+--// config (camera/spectate only)
+local cfg = {
+	enabled = false,
+	st = "",
+
+	mode = "free", -- free | lock | chase
+
+	dist = 15,
+	height = 8,
+	smooth = 6, -- 1..15
+
+	pan = true,
+	panspeed = 1.2, -- 0.3..5
+
+	hotkey = Enum.KeyCode.F6,
+}
+
+--// spectate target state (st)
+local st = {
+	player = nil,
+	alive = false,
+
+	root = nil,
+	lastpos = nil,
+	lastcf = nil,
+
+	activepos = nil,
+	activecf = nil,
+}
+
+local function resolvestbyname(name)
+	if not name or name == "" or name == "none" then return nil end
+	for _, p in ipairs(plrs:GetPlayers()) do
+		if p ~= lp and p.Name == name then
+			return p
+		end
+	end
+	return nil
+end
+
+local function findnearestalive()
+	local mychr = safeprop(lp, "Character")
+	local myroot = getroot(mychr)
+	if not myroot then return nil end
+
+	local mypos = safev3(myroot.Position)
+	local best, bestdist = nil, math.huge
+
+	for _, p in ipairs(plrs:GetPlayers()) do
+		if p ~= lp and isalive(p) then
+			local chr = safeprop(p, "Character")
+			local root = getroot(chr)
+			if root then
+				local d = (safev3(root.Position) - mypos).Magnitude
+				if d < bestdist then
+					bestdist = d
+					best = p
+				end
+			end
+		end
+	end
+	return best
+end
+
+local function setst(name)
+	name = tostring(name or ""):gsub("^%s+",""):gsub("%s+$","")
+	if name:lower() == "none" then name = "" end
+
+	cfg.st = name
+	st.player = resolvestbyname(cfg.st)
+
+	st.alive = false
+	st.root = nil
+	st.lastpos = nil
+	st.lastcf = nil
+	st.activepos = nil
+	st.activecf = nil
+
+	if cfg.st == "" then
+		notify("sightseeing", "st cleared", 2)
+	else
+		notify("sightseeing", "st -> "..cfg.st, 2)
+	end
+end
+
+local function updatest()
+	if cfg.st == "" then
+		st.player = nil
+		st.alive = false
+		st.root = nil
+		st.activepos = nil
+		st.activecf = nil
+		return
+	end
+
+	if (not st.player) or st.player.Name ~= cfg.st then
+		st.player = resolvestbyname(cfg.st)
+	end
+
+	local p = st.player
+	if not p then
+		st.alive = false
+		st.root = nil
+		st.activepos = st.lastpos
+		st.activecf = st.lastcf
+		return
+	end
+
+	local alive = isalive(p)
+	st.alive = alive
+
+	local chr = safeprop(p, "Character")
+	local root = getroot(chr)
+	st.root = root
+
+	if alive and root then
+		local pos = safev3(root.Position)
+		local cfr = safeprop(root, "CFrame")
+		if pos ~= zv3 and cfr then
+			st.lastpos = pos
+			st.lastcf = cfr
+			st.activepos = pos
+			st.activecf = cfr
+		else
+			st.activepos = st.lastpos
+			st.activecf = st.lastcf
+		end
+	else
+		st.activepos = st.lastpos
+		st.activecf = st.lastcf
+	end
+end
+
+--// camera override (v7 style: never scriptable, only overwrite cframe)
+local camoverrideactive = false
+local camoverridecf = nil
+local camengaged = false
+
+local camlockpos = nil
+local camlooktarget = nil
+local camlastvalidcf = nil
+
+local campanactive = false
+local campanblend = 0
+local campanfrompos = nil
+local campanfromlook = nil
+
+local camrestorecooldown = 0
+
+local function engagecamoverride()
+	if camengaged then return end
+	camengaged = true
+end
+
+local function disengagecamoverride()
+	if not camengaged and not camoverrideactive then return end
+
+	camoverrideactive = false
+	camoverridecf = nil
+	camlockpos = nil
+	camlooktarget = nil
+	camlastvalidcf = nil
+
+	campanactive = false
+	campanblend = 0
+	campanfrompos = nil
+	campanfromlook = nil
+
+	if camengaged then
+		camengaged = false
+		pcall(function()
+			cam.CameraType = Enum.CameraType.Custom
+			local hum = gethum(safeprop(lp, "Character"))
+			if hum then cam.CameraSubject = hum end
+		end)
+	end
+end
+
+local cambindkey = "sightseeing_cam_v7"
+pcall(function() rs:UnbindFromRenderStep(cambindkey) end)
+
+rs:BindToRenderStep(cambindkey, Enum.RenderPriority.Camera.Value + 1, function()
+	if camoverrideactive and camoverridecf then
+		pcall(function()
+			cam.CFrame = camoverridecf
+		end)
+	end
+end)
+
+local function compute_desired_camera()
+	-- returns campos, lookpos, ok
+	local tpos = st.activepos
+	local tcf_ = st.activecf
+
+	if not tpos or not tcf_ then
+		return nil, nil, false
+	end
+
+	tpos = safev3(tpos)
+	if tpos == zv3 then
+		return nil, nil, false
+	end
+
+	local look = tpos + v3(0, 2, 0)
+
+	if cfg.mode == "lock" then
+		local behind = -tcf_.LookVector
+		local flat = v3(behind.X, 0, behind.Z)
+		if flat.Magnitude < 0.05 then flat = v3(0,0,1) end
+		flat = flat.Unit
+		local pos = tpos + flat * cfg.dist + v3(0, cfg.height, 0)
+		return pos, look, true
+
+	elseif cfg.mode == "chase" then
+		local behind
+		if st.root then
+			local ok, vel = pcall(function() return st.root.AssemblyLinearVelocity end)
+			if ok and typeof(vel) == "Vector3" then
+				local flatv = v3(vel.X, 0, vel.Z)
+				if flatv.Magnitude > 2 then
+					behind = -flatv.Unit
+				end
+			end
+		end
+
+		if not behind then
+			local lv = -tcf_.LookVector
+			local flat = v3(lv.X, 0, lv.Z)
+			if flat.Magnitude < 0.05 then flat = v3(0,0,1) end
+			behind = flat.Unit
+		end
+
+		local pos = tpos + behind * cfg.dist + v3(0, cfg.height, 0)
+		return pos, look, true
+	end
+
+	return nil, nil, false
+end
+
+local function start_pan_from_current()
+	-- blend from current camera to desired (so "on enable" immediately focuses st smoothly)
+	local current = safeprop(cam, "CFrame")
+	if not current then return end
+	campanfrompos = safev3(current.Position)
+
+	-- approximate current look target (a point in front of camera)
+	local forward = current.LookVector
+	campanfromlook = campanfrompos + forward * 25
+
+	campanactive = true
+	campanblend = 0
+end
+
+local function tickcamerasystem(dt)
+	-- hard off
+	if (not cfg.enabled) or (cfg.mode == "free") then
+		disengagecamoverride()
+		return
+	end
+
+	-- death-counter safety cooldown
+	if camrestorecooldown > 0 then
+		camrestorecooldown = mx(0, camrestorecooldown - dt)
+		disengagecamoverride()
+		return
+	end
+
+	-- local cutscene/death -> bail
+	if islocalplayerincutscene() then
+		disengagecamoverride()
+		return
+	end
+
+	updatest()
+
+	-- require an st position to spectate
+	if not st.activepos or not st.activecf then
+		disengagecamoverride()
+		return
+	end
+
+	local desiredpos, desiredlook, ok = compute_desired_camera()
+	if not ok then
+		disengagecamoverride()
+		return
+	end
+
+	desiredpos = safev3(desiredpos)
+	desiredlook = safev3(desiredlook)
+	if desiredpos == zv3 or desiredlook == zv3 then
+		disengagecamoverride()
+		return
+	end
+
+	-- start pan if needed
+	if cfg.pan and (not camoverrideactive) and (not campanactive) then
+		start_pan_from_current()
+	end
+
+	-- pan blend (no localplayer source; just camera -> st)
+	if campanactive and cfg.pan then
+		local panspeed = clamp(cfg.panspeed, 0.3, 5)
+		campanblend = mn(1, campanblend + dt * panspeed)
+
+		local eased = campanblend * campanblend * (3 - 2 * campanblend) -- smoothstep
+		local p0 = campanfrompos or desiredpos
+		local l0 = campanfromlook or desiredlook
+
+		desiredpos = lerpv3(p0, desiredpos, eased)
+		desiredlook = lerpv3(l0, desiredlook, eased)
+
+		if campanblend >= 0.999 then
+			campanactive = false
+		end
+	end
+
+	-- smoothing (v7 damping)
+	local smoothfactor = clamp(cfg.smooth * 0.04, 0.02, 1)
+
+	camlooktarget = camlooktarget and dampv3(camlooktarget, desiredlook, smoothfactor * 1.8, dt) or desiredlook
+	camlockpos = camlockpos and dampv3(camlockpos, desiredpos, smoothfactor, dt) or desiredpos
+
+	camlockpos = safev3(camlockpos)
+	camlooktarget = safev3(camlooktarget)
+
+	if camlockpos == zv3 or camlooktarget == zv3 then
+		if camlastvalidcf then camoverridecf = camlastvalidcf end
+		return
+	end
+
+	-- prevent look-at-self
+	if (camlooktarget - camlockpos).Magnitude < 0.1 then
+		camlooktarget = camlockpos + v3(0,0,-1)
+	end
+
+	local newcf = cf(camlockpos, camlooktarget)
+	local p = newcf.Position
+	if p.X == p.X and p.Y == p.Y and p.Z == p.Z then
+		camoverridecf = newcf
+		camlastvalidcf = newcf
+		engagecamoverride()
+		camoverrideactive = true
+	else
+		if camlastvalidcf then camoverridecf = camlastvalidcf end
+	end
+end
+
+-- respawn handling (kept, local-player safety)
+hook(lp.CharacterRemoving:Connect(function()
+	disengagecamoverride()
+	camrestorecooldown = 3.5
+	pcall(function()
+		cam.CameraType = Enum.CameraType.Custom
+	end)
+end))
+
+hook(lp.CharacterAdded:Connect(function(chr)
+	disengagecamoverride()
+	if camrestorecooldown < 2 then camrestorecooldown = 2 end
+
+	task.defer(function()
+		local timeout = tk() + 6
+		while tk() < timeout do
+			local r = getroot(chr)
+			local h = gethum(chr)
+			if r and h and safeprop(h, "Health") and safeprop(h, "Health") > 0 then break end
+			task.wait(0.15)
+		end
+
+		pcall(function()
+			local hum = gethum(chr)
+			if hum then
+				cam.CameraType = Enum.CameraType.Custom
+				cam.CameraSubject = hum
+			end
+		end)
+	end)
+end))
+
+-- update loop
+hook(rs.RenderStepped:Connect(function(dt)
+	tickcamerasystem(dt)
+end))
+
+-- hotkey toggle
+hook(uis.InputBegan:Connect(function(inp, gpe)
+	if gpe then return end
+	if inp.KeyCode == cfg.hotkey then
+		cfg.enabled = not cfg.enabled
+		notify("sightseeing", cfg.enabled and "enabled" or "disabled", 2)
+		if cfg.enabled then
+			-- when enabling, immediately pan to st if we can
+			campanactive = false
+			if cfg.pan then start_pan_from_current() end
+		else
+			disengagecamoverride()
+		end
+	end
+end))
+
+-- curl ui (camera/spectate + settings only)
+task.defer(function()
+	local ok, curl = pcall(function()
+		return loadstring(game:HttpGet("https://raw.githubusercontent.com/Spektronazam/curlc/refs/heads/main/source"))()
+	end)
+	if not ok or not curl then
+		warn("[sightseeing] curl ui failed to load; running headless (f6 toggles)")
+		return
+	end
+
+	local ui = curl.new({ title = "sightseeing" })
+	_G.sightseeing_gui = ui.gui or ui.container or nil
+
+	local p1 = ui:addPage({ title = "spectate" })
+	local s1 = p1:addSection({ title = "st" })
+
+	s1:addToggle({
+		title = "enabled",
+		default = cfg.enabled,
+		callback = function(v)
+			cfg.enabled = v
+			if v then
+				campanactive = false
+				if cfg.pan then start_pan_from_current() end
+				if cfg.st == "" then notify("sightseeing", "set st first", 2) end
+			else
+				disengagecamoverride()
+			end
+		end
+	})
+
+	s1:addTextbox({
+		title = "st (username)",
+		default = (cfg.st ~= "" and cfg.st) or "none",
+		callback = function(text, focuslost)
+			if focuslost then
+				setst(text)
+				-- if enabled, repan to new st
+				if cfg.enabled and cfg.pan then
+					campanactive = false
+					start_pan_from_current()
+				end
+			end
+		end
+	})
+
+	s1:addButton({
+		title = "set nearest alive",
+		callback = function()
+			local p = findnearestalive()
+			if p then
+				setst(p.Name)
+				if cfg.enabled and cfg.pan then
+					campanactive = false
+					start_pan_from_current()
+				end
+			else
+				notify("sightseeing", "no alive players found", 2)
+			end
+		end
+	})
+
+	s1:addDropdown({
+		title = "mode",
+		list = { "free", "lock", "chase" },
+		callback = function(v)
+			cfg.mode = tostring(v):lower()
+			if cfg.mode == "free" then
+				disengagecamoverride()
+			else
+				if cfg.enabled and cfg.pan then
+					campanactive = false
+					start_pan_from_current()
+				end
+			end
+		end
+	})
+
+	local s2 = p1:addSection({ title = "camera" })
+	s2:addSlider({ title = "dist", min = 5, max = 80, default = cfg.dist, callback = function(v) cfg.dist = v end })
+	s2:addSlider({ title = "height", min = 0, max = 40, default = cfg.height, callback = function(v) cfg.height = v end })
+	s2:addSlider({ title = "smooth", min = 1, max = 15, default = cfg.smooth, callback = function(v) cfg.smooth = v end })
+
+	local p2 = ui:addPage({ title = "settings" })
+	local ss = p2:addSection({ title = "misc" })
+
+	ss:addToggle({
+		title = "pan to st",
+		default = cfg.pan,
+		callback = function(v)
+			cfg.pan = v
+			if cfg.enabled and v then
+				campanactive = false
+				start_pan_from_current()
+			end
+		end
+	})
+
+	ss:addSlider({
+		title = "pan speed (%)",
+		min = 30, max = 500,
+		default = math.floor(cfg.panspeed * 100 + 0.5),
+		callback = function(v) cfg.panspeed = v / 100 end
+	})
+
+	ss:addButton({
+		title = "unload",
+		callback = function()
+			if _G.sightseeingcleanup then _G.sightseeingcleanup() end
+		end
+	})
+
+	ui:SelectPage({ page = ui.pages[1], toggle = true })
+end)
+
+notify("sightseeing", "loaded (f6 toggles)", 3)
+
+-- cleanup
+_G.sightseeingcleanup = function()
+	pcall(function() rs:UnbindFromRenderStep(cambindkey) end)
+	disengagecamoverride()
+	unhookall()
+
+	local g = rawget(_G, "sightseeing_gui")
+	if typeof(g) == "Instance" then pcall(function() g:Destroy() end) end
+	_G.sightseeing_gui = nil
+
+	pcall(function()
+		cam.CameraType = Enum.CameraType.Custom
+		local hum = gethum(safeprop(lp, "Character"))
+		if hum then cam.CameraSubject = hum end
+	end)
+
+	_G.sightseeingcleanup = nil
+end
