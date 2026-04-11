@@ -1,10 +1,12 @@
 -- curl -c
--- cleaner rewrite with:
--- better sidebar
--- smoother animations
--- function search
--- connection cleanup / destroy
--- linoria-style hsv color picker with optional transparency
+-- PC-focused UI library with:
+--  • Rayfield-style smooth open/close
+--  • Debounced function search
+--  • Smarter dropdowns & popups
+--  • Preset themes + live theme editor
+--  • Adjustable corner roundness
+--  • Smart border clamp (no off-screen window)
+--  • Linoria/Obsidian-style HSV color picker
 
 pcall(function()
 	game:GetService("StarterGui"):SetCore("SendNotification", {
@@ -20,19 +22,86 @@ local RunService = game:GetService("RunService")
 local CoreGui = game:GetService("CoreGui")
 local Players = game:GetService("Players")
 local StarterGui = game:GetService("StarterGui")
+local Workspace = game:GetService("Workspace")
 
 local curl = {}
 curl.__index = curl
 
-local defaultThemes = {
+-- base theme used as a fallback
+local defaultTheme = {
 	Background = Color3.fromRGB(24, 24, 24),
 	Glow = Color3.fromRGB(0, 0, 0),
-	Accent = Color3.fromRGB(62, 62, 62),
-	LightContrast = Color3.fromRGB(20, 20, 20),
-	DarkContrast = Color3.fromRGB(14, 14, 14),
+	Accent = Color3.fromRGB(62, 62, 120),
+	LightContrast = Color3.fromRGB(20, 20, 26),
+	DarkContrast = Color3.fromRGB(14, 14, 18),
 	TextColor = Color3.fromRGB(255, 255, 255),
 	SubText = Color3.fromRGB(165, 165, 165),
 }
+
+local function cloneTheme(theme)
+	local t = {}
+	for k, v in pairs(theme or {}) do
+		t[k] = v
+	end
+	return t
+end
+
+-- Preset themes (you can add more if you want)
+local presetThemes = {
+	Default = cloneTheme(defaultTheme),
+
+	["Rayfield Dark"] = {
+		Background = Color3.fromRGB(25, 25, 25),
+		Glow = Color3.fromRGB(20, 20, 20),
+		Accent = Color3.fromRGB(50, 138, 220),
+		LightContrast = Color3.fromRGB(35, 35, 35),
+		DarkContrast = Color3.fromRGB(30, 30, 30),
+		TextColor = Color3.fromRGB(240, 240, 240),
+		SubText = Color3.fromRGB(178, 178, 178),
+	},
+
+	["Nord"] = {
+		Background = Color3.fromRGB(35, 44, 59),
+		Glow = Color3.fromRGB(15, 18, 26),
+		Accent = Color3.fromRGB(129, 161, 193),
+		LightContrast = Color3.fromRGB(46, 52, 64),
+		DarkContrast = Color3.fromRGB(40, 46, 59),
+		TextColor = Color3.fromRGB(236, 239, 244),
+		SubText = Color3.fromRGB(163, 190, 210),
+	},
+
+	["Dracula"] = {
+		Background = Color3.fromRGB(40, 42, 54),
+		Glow = Color3.fromRGB(0, 0, 0),
+		Accent = Color3.fromRGB(189, 147, 249),
+		LightContrast = Color3.fromRGB(45, 47, 59),
+		DarkContrast = Color3.fromRGB(33, 34, 44),
+		TextColor = Color3.fromRGB(248, 248, 242),
+		SubText = Color3.fromRGB(98, 114, 164),
+	},
+
+	["Light"] = {
+		Background = Color3.fromRGB(235, 235, 235),
+		Glow = Color3.fromRGB(180, 180, 180),
+		Accent = Color3.fromRGB(65, 130, 255),
+		LightContrast = Color3.fromRGB(250, 250, 250),
+		DarkContrast = Color3.fromRGB(220, 220, 220),
+		TextColor = Color3.fromRGB(20, 20, 20),
+		SubText = Color3.fromRGB(96, 96, 96),
+	},
+
+	["Obsidian-ish"] = {
+		Background = Color3.fromRGB(18, 18, 22),
+		Glow = Color3.fromRGB(0, 0, 0),
+		Accent = Color3.fromRGB(122, 162, 247),
+		LightContrast = Color3.fromRGB(24, 24, 30),
+		DarkContrast = Color3.fromRGB(14, 14, 20),
+		TextColor = Color3.fromRGB(235, 235, 245),
+		SubText = Color3.fromRGB(144, 148, 170),
+	},
+}
+
+curl.PresetThemes = presetThemes
 
 local function tween(instance, properties, duration, style, direction)
 	local tw = TweenService:Create(
@@ -79,6 +148,13 @@ end
 
 local function lower(str)
 	return string.lower(tostring(str or ""))
+end
+
+-- Strip control chars + extended unicode so we don't get "missing glyph" rectangles
+local function sanitizeText(str)
+	str = tostring(str or "")
+	str = str:gsub("[%z\1-\31\127-\255]", "")
+	return str
 end
 
 local function shifted(pos, x, y)
@@ -138,14 +214,25 @@ local function inputMatchesBind(input, bind)
 	return false
 end
 
-local function addCorner(obj, radius)
+-- UICorner registry so we can globally adjust roundness later
+local function addCorner(ui, obj, baseRadius)
 	local c = Instance.new("UICorner")
-	c.CornerRadius = UDim.new(0, radius or 8)
+	baseRadius = baseRadius or 8
+	local scale = (type(ui) == "table" and ui.cornerScale) or 1
+	c.CornerRadius = UDim.new(0, math.floor(baseRadius * scale + 0.5))
 	c.Parent = obj
+
+	if type(ui) == "table" and ui._corners then
+		table.insert(ui._corners, {
+			corner = c,
+			base = baseRadius
+		})
+	end
+
 	return c
 end
 
-local function makeChecker(parent, width, height, cell, zIndex)
+local function makeChecker(ui, parent, width, height, cell, zIndex)
 	local holder = make("Frame", {
 		BackgroundColor3 = Color3.fromRGB(105, 105, 105),
 		BorderSizePixel = 0,
@@ -155,14 +242,14 @@ local function makeChecker(parent, width, height, cell, zIndex)
 		Parent = parent
 	})
 
-	addCorner(holder, 4)
+	addCorner(ui, holder, 4)
 
 	local cols = math.ceil(width / cell)
 	local rows = math.ceil(height / cell)
 
 	for y = 0, rows - 1 do
 		for x = 0, cols - 1 do
-			local square = make("Frame", {
+			make("Frame", {
 				BackgroundColor3 = ((x + y) % 2 == 0) and Color3.fromRGB(120, 120, 120) or Color3.fromRGB(85, 85, 85),
 				BorderSizePixel = 0,
 				Size = UDim2.new(0, cell, 0, cell),
@@ -175,6 +262,8 @@ local function makeChecker(parent, width, height, cell, zIndex)
 
 	return holder
 end
+
+-- INSTANCE METHODS -----------------------------------------------------------
 
 function curl:_connect(signal, fn)
 	local connection = signal:Connect(fn)
@@ -189,7 +278,7 @@ end
 
 function curl:registerTheme(obj, prop, themeName)
 	self.themeObjects[themeName] = self.themeObjects[themeName] or {}
-	table.insert(self.themeObjects[themeName], {obj = obj, prop = prop})
+	table.insert(self.themeObjects[themeName], { obj = obj, prop = prop })
 
 	pcall(function()
 		obj[prop] = self.theme[themeName]
@@ -216,6 +305,44 @@ function curl:updateTheme(themeName, color)
 	end
 end
 
+-- Apply a full theme table (or preset name)
+function curl:ApplyTheme(theme)
+	local themeTable = nil
+
+	if typeof(theme) == "string" then
+		themeTable = presetThemes[theme]
+	elseif typeof(theme) == "table" then
+		themeTable = theme
+	end
+
+	if not themeTable then
+		return
+	end
+
+	for k, v in pairs(defaultTheme) do
+		self.theme[k] = themeTable[k] or defaultTheme[k]
+	end
+
+	for name, list in pairs(self.themeObjects) do
+		for _, item in ipairs(list) do
+			pcall(function()
+				if item.obj then
+					item.obj[item.prop] = self.theme[name]
+				end
+			end)
+		end
+	end
+
+	for _, page in ipairs(self.pages) do
+		self:_setTabState(page, page == self.currentTab, true)
+	end
+
+	for _, fn in ipairs(self._refreshCallbacks) do
+		pcall(fn)
+	end
+end
+
+-- compatibility helper (single-color updates)
 function curl:setTheme(options)
 	options = options or {}
 	if options.theme and options.color3 then
@@ -232,15 +359,51 @@ function curl:_bindHover(obj, idleTheme, hoverColor)
 		if obj:GetAttribute("Selected") then
 			return
 		end
-		tween(obj, {BackgroundColor3 = hoverColor or self.theme.Background}, 0.12)
+		tween(obj, { BackgroundColor3 = hoverColor or self.theme.Background }, 0.12)
 	end)
 
 	self:_connect(obj.MouseLeave, function()
 		if obj:GetAttribute("Selected") then
 			return
 		end
-		tween(obj, {BackgroundColor3 = self.theme[idleTheme]}, 0.12)
+		tween(obj, { BackgroundColor3 = self.theme[idleTheme] }, 0.12)
 	end)
+end
+
+function curl:_clampMainToScreen(animate)
+	if not self.smartScreenClamp or not self.main or not self.main.Parent then
+		return
+	end
+
+	local camera = Workspace.CurrentCamera
+	if not camera then
+		return
+	end
+
+	local vs = camera.ViewportSize
+	local size = self.main.AbsoluteSize
+	if size.X <= 0 or size.Y <= 0 then
+		return
+	end
+
+	local ap = self.main.AbsolutePosition
+
+	local padding = 6
+	local minX, minY = padding, padding
+	local maxX = math.max(vs.X - size.X - padding, minX)
+	local maxY = math.max(vs.Y - size.Y - padding, minY)
+
+	local newX = math.clamp(ap.X, minX, maxX)
+	local newY = math.clamp(ap.Y, minY, maxY)
+
+	local newPos = UDim2.new(0, newX, 0, newY)
+	self._openPosition = newPos
+
+	if animate then
+		tween(self.main, { Position = newPos }, 0.16)
+	else
+		self.main.Position = newPos
+	end
 end
 
 function curl:_setOpen(state, instant)
@@ -250,6 +413,7 @@ function curl:_setOpen(state, instant)
 
 	if self._activePopupCloser and not state then
 		pcall(self._activePopupCloser)
+		self._activePopupCloser = nil
 	end
 
 	self._isOpen = state
@@ -257,17 +421,23 @@ function curl:_setOpen(state, instant)
 	if state then
 		self.main.Visible = true
 
+		if self.smartScreenClamp then
+			self:_clampMainToScreen(false)
+		end
+
+		local target = self._openPosition or self.main.Position
+
 		if instant then
-			self.main.Position = self._openPosition
+			self.main.Position = target
 			self.mainScale.Scale = 1
 			return
 		end
 
-		self.main.Position = shifted(self._openPosition, 0, 10)
-		self.mainScale.Scale = 0.97
+		self.main.Position = shifted(target, 0, 14)
+		self.mainScale.Scale = 0.93
 
-		tween(self.main, {Position = self._openPosition}, 0.18)
-		tween(self.mainScale, {Scale = 1}, 0.18)
+		tween(self.main, { Position = target }, 0.22)
+		tween(self.mainScale, { Scale = 1 }, 0.22)
 	else
 		if instant then
 			self.main.Visible = false
@@ -276,10 +446,12 @@ function curl:_setOpen(state, instant)
 			return
 		end
 
-		tween(self.main, {Position = shifted(self._openPosition, 0, 10)}, 0.14)
-		tween(self.mainScale, {Scale = 0.97}, 0.14)
+		local target = shifted(self._openPosition or self.main.Position, 0, 16)
 
-		task.delay(0.14, function()
+		tween(self.main, { Position = target }, 0.18)
+		tween(self.mainScale, { Scale = 0.96 }, 0.18)
+
+		task.delay(0.18, function()
 			if self.main and not self._destroyed and not self._isOpen then
 				self.main.Visible = false
 				self.main.Position = self._openPosition
@@ -311,9 +483,9 @@ function curl:_setTabState(page, selected, instant)
 		return
 	end
 
-	tween(page.tabButton, {BackgroundColor3 = bg}, 0.16)
-	tween(page.tabTitle, {TextColor3 = text}, 0.16)
-	tween(page.tabIndicator, {BackgroundTransparency = lineTransparency}, 0.16)
+	tween(page.tabButton, { BackgroundColor3 = bg }, 0.16)
+	tween(page.tabTitle, { TextColor3 = text }, 0.16)
+	tween(page.tabIndicator, { BackgroundTransparency = lineTransparency }, 0.16)
 end
 
 function curl:_registerControl(section, title, frame, kind, keywords)
@@ -368,7 +540,7 @@ end
 
 function curl:RefreshSearch(query)
 	if query ~= nil then
-		self.searchQuery = trim(query)
+		self.searchQuery = sanitizeText(trim(query))
 	end
 
 	local search = lower(self.searchQuery or "")
@@ -413,8 +585,9 @@ function curl:RefreshSearch(query)
 		end
 	end
 
+	-- Only auto-switch if the current page has nothing and the user actually searched
 	if search ~= "" and self.currentTab and (self.currentTab._matchCount or 0) == 0 and firstMatchingPage then
-		self:SelectPage({page = firstMatchingPage})
+		self:SelectPage({ page = firstMatchingPage })
 	end
 end
 
@@ -422,11 +595,24 @@ function curl:Notify(options)
 	options = options or {}
 	pcall(function()
 		StarterGui:SetCore("SendNotification", {
-			Title = options.title or "Notification",
-			Text = tostring(options.text or ""),
+			Title = sanitizeText(options.title or "Notification"),
+			Text = sanitizeText(options.text or ""),
 			Duration = tonumber(options.duration) or 5
 		})
 	end)
+end
+
+function curl:SetCornerScale(scale)
+	scale = tonumber(scale) or 1
+	scale = math.clamp(scale, 0, 2)
+	self.cornerScale = scale
+
+	for _, data in ipairs(self._corners or {}) do
+		if data.corner then
+			local r = math.floor((data.base or 8) * scale + 0.5)
+			data.corner.CornerRadius = UDim.new(0, r)
+		end
+	end
 end
 
 function curl:Destroy()
@@ -435,6 +621,11 @@ function curl:Destroy()
 	end
 
 	self._destroyed = true
+
+	if self._activePopupCloser then
+		pcall(self._activePopupCloser)
+	end
+	self._activePopupCloser = nil
 
 	for _, connection in ipairs(self._connections or {}) do
 		if connection and connection.Connected then
@@ -447,6 +638,7 @@ function curl:Destroy()
 	self._refreshCallbacks = {}
 	self.pages = {}
 	self.themeObjects = {}
+	self._corners = {}
 
 	if self.gui then
 		self.gui:Destroy()
@@ -454,6 +646,22 @@ function curl:Destroy()
 end
 
 curl.Cleanup = curl.Destroy
+
+local function parseToggleKey(opt)
+	if typeof(opt) == "EnumItem" and opt.EnumType == Enum.KeyCode then
+		return opt
+	elseif type(opt) == "string" and opt ~= "" then
+		local ok, key = pcall(function()
+			return Enum.KeyCode[opt]
+		end)
+		if ok and key then
+			return key
+		end
+	end
+	return Enum.KeyCode.RightShift
+end
+
+-- MAIN CONSTRUCTOR ----------------------------------------------------------
 
 function curl.new(options)
 	options = options or {}
@@ -465,17 +673,39 @@ function curl.new(options)
 	self._connections = {}
 	self._controls = {}
 	self._refreshCallbacks = {}
+	self._corners = {}
 	self.currentTab = nil
 	self.searchQuery = ""
 	self._isOpen = true
 	self._destroyed = false
 	self._activePopupCloser = nil
+	self.smartScreenClamp = options.smartScreenClamp ~= false
+	self.cornerScale = tonumber(options.cornerScale) or 1
+	self._searchToken = 0
+	self._hasSettingsPage = false
+	self._settingsPage = nil
+	self.presetThemes = presetThemes
+	self._toggleKey = parseToggleKey(options.toggleKey)
 
-	for k, v in pairs(defaultThemes) do
+	for k, v in pairs(defaultTheme) do
 		self.theme[k] = v
 	end
 
-	local title = options.title or "curl -c"
+	-- Allow full theme table or preset name
+	if typeof(options.theme) == "string" then
+		local preset = presetThemes[options.theme]
+		if preset then
+			for k, v in pairs(defaultTheme) do
+				self.theme[k] = preset[k] or v
+			end
+		end
+	elseif typeof(options.theme) == "table" then
+		for k, v in pairs(defaultTheme) do
+			self.theme[k] = options.theme[k] or v
+		end
+	end
+
+	local title = sanitizeText(options.title or "curl -c")
 
 	local player = Players.LocalPlayer or Players.PlayerAdded:Wait()
 	local playerGui = player:WaitForChild("PlayerGui")
@@ -513,7 +743,7 @@ function curl.new(options)
 		ClipsDescendants = true,
 		Parent = gui
 	})
-	addCorner(main, 10)
+	addCorner(self, main, 10)
 
 	local mainScale = Instance.new("UIScale")
 	mainScale.Scale = 1
@@ -555,7 +785,7 @@ function curl.new(options)
 		BackgroundTransparency = 1,
 		Size = UDim2.new(0.5, -14, 1, 0),
 		Position = UDim2.new(0.5, 0, 0, 0),
-		Text = "RightShift",
+		Text = bindToText(self._toggleKey),
 		TextXAlignment = Enum.TextXAlignment.Right,
 		Font = Enum.Font.Gotham,
 		TextSize = 12,
@@ -597,7 +827,7 @@ function curl.new(options)
 		BorderSizePixel = 0,
 		Parent = sidebar
 	})
-	addCorner(searchShell, 7)
+	addCorner(self, searchShell, 7)
 
 	local searchIcon = make("TextLabel", {
 		BackgroundTransparency = 1,
@@ -651,13 +881,14 @@ function curl.new(options)
 		Parent = main
 	})
 
+	-- dragging
 	local dragging = false
 	local dragInput = nil
 	local dragStart = nil
 	local startPos = nil
 
 	self:_connect(topbar.InputBegan, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
 			dragging = true
 			dragStart = input.Position
 			startPos = main.Position
@@ -676,7 +907,7 @@ function curl.new(options)
 	end)
 
 	self:_connect(topbar.InputChanged, function(input)
-		if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+		if input.UserInputType == Enum.UserInputType.MouseMovement then
 			dragInput = input
 		end
 	end)
@@ -684,13 +915,18 @@ function curl.new(options)
 	self:_connect(UserInputService.InputChanged, function(input)
 		if dragging and input == dragInput then
 			local delta = input.Position - dragStart
-			main.Position = UDim2.new(
+			local newPos = UDim2.new(
 				startPos.X.Scale,
 				startPos.X.Offset + delta.X,
 				startPos.Y.Scale,
 				startPos.Y.Offset + delta.Y
 			)
-			self._openPosition = main.Position
+			main.Position = newPos
+			self._openPosition = newPos
+
+			if self.smartScreenClamp then
+				self:_clampMainToScreen(false)
+			end
 		end
 	end)
 
@@ -703,13 +939,27 @@ function curl.new(options)
 			return
 		end
 
-		if input.KeyCode == Enum.KeyCode.RightShift then
+		if isKeyBind(self._toggleKey) and input.KeyCode == self._toggleKey then
 			self:toggle()
 		end
 	end)
 
+	-- debounced search
 	self:_connect(searchBox:GetPropertyChangedSignal("Text"), function()
-		self:RefreshSearch(searchBox.Text)
+		local raw = sanitizeText(searchBox.Text)
+		if raw ~= searchBox.Text then
+			searchBox.Text = raw
+		end
+
+		self._searchToken += 1
+		local token = self._searchToken
+
+		task.delay(0.08, function()
+			if self._destroyed or token ~= self._searchToken then
+				return
+			end
+			self:RefreshSearch(raw)
+		end)
 	end)
 
 	self.gui = gui
@@ -734,8 +984,54 @@ function curl.new(options)
 	self:registerTheme(searchBox, "TextColor3", "TextColor")
 	self:registerTheme(tabList, "ScrollBarImageColor3", "Accent")
 
+	-- center window nicely on PC
+	task.defer(function()
+		if self._destroyed or not main or not main.Parent then
+			return
+		end
+
+		local camera = Workspace.CurrentCamera
+		if not camera then
+			return
+		end
+
+		local vs = camera.ViewportSize
+		local size = main.AbsoluteSize
+		local x = math.floor((vs.X - size.X) / 2)
+		local y = math.floor((vs.Y - size.Y) / 2)
+
+		main.Position = UDim2.new(0, x, 0, y)
+		self._openPosition = main.Position
+
+		if self.smartScreenClamp then
+			self:_clampMainToScreen(false)
+		end
+	end)
+
+	-- Apply initial corner scale after all corners are created
+	task.defer(function()
+		if not self._destroyed then
+			self:SetCornerScale(self.cornerScale)
+		end
+	end)
+
+	self:RefreshSearch(self.searchQuery)
+
+	-- auto settings page (can be disabled with options.noSettingsPage = true)
+	if not options.noSettingsPage then
+		self:CreateSettingsPage()
+	end
+
+	-- start hidden if requested
+	if options.startHidden then
+		self._isOpen = false
+		self:_setOpen(false, true)
+	end
+
 	return self
 end
+
+-- PAGE / SECTIONS -----------------------------------------------------------
 
 function curl:SelectPage(options)
 	options = options or {}
@@ -746,6 +1042,7 @@ function curl:SelectPage(options)
 
 	if self._activePopupCloser then
 		pcall(self._activePopupCloser)
+		self._activePopupCloser = nil
 	end
 
 	if self.currentTab == page then
@@ -761,7 +1058,7 @@ function curl:SelectPage(options)
 	if previous and previous.pageFrame then
 		self:_setTabState(previous, false)
 		previous.pageFrame.Visible = true
-		tween(previous.pageFrame, {Position = UDim2.new(0, -12, 0, 0)}, 0.14)
+		tween(previous.pageFrame, { Position = UDim2.new(0, -12, 0, 0) }, 0.14)
 
 		task.delay(0.14, function()
 			if previous.pageFrame and self.currentTab ~= previous and not self._destroyed then
@@ -773,7 +1070,7 @@ function curl:SelectPage(options)
 
 	page.pageFrame.Position = UDim2.new(0, 12, 0, 0)
 	page.pageFrame.Visible = true
-	tween(page.pageFrame, {Position = UDim2.new(0, 0, 0, 0)}, 0.18)
+	tween(page.pageFrame, { Position = UDim2.new(0, 0, 0, 0) }, 0.18)
 	self:_setTabState(page, true)
 
 	if options.toggle ~= nil then
@@ -785,7 +1082,7 @@ function curl:addPage(options)
 	options = options or {}
 
 	local ui = self
-	local title = options.title or "Page"
+	local title = sanitizeText(options.title or "Page")
 	local page = {
 		title = title,
 		sections = {}
@@ -799,7 +1096,7 @@ function curl:addPage(options)
 		Text = "",
 		Parent = self.tabList
 	})
-	addCorner(tabBtn, 7)
+	addCorner(self, tabBtn, 7)
 
 	local tabIndicator = make("Frame", {
 		Size = UDim2.new(0, 3, 1, -12),
@@ -809,7 +1106,7 @@ function curl:addPage(options)
 		BorderSizePixel = 0,
 		Parent = tabBtn
 	})
-	addCorner(tabIndicator, 100)
+	addCorner(self, tabIndicator, 100)
 
 	local tabTitle = make("TextLabel", {
 		BackgroundTransparency = 1,
@@ -835,7 +1132,7 @@ function curl:addPage(options)
 		TextColor3 = self.theme.TextColor,
 		Parent = tabBtn
 	})
-	addCorner(tabBadge, 100)
+	addCorner(self, tabBadge, 100)
 
 	self:registerTheme(tabBtn, "BackgroundColor3", "LightContrast")
 	self:registerTheme(tabIndicator, "BackgroundColor3", "Accent")
@@ -880,20 +1177,20 @@ function curl:addPage(options)
 	page.pageFrame = pageFrame
 
 	self:_connect(tabBtn.MouseButton1Click, function()
-		self:SelectPage({page = page})
+		self:SelectPage({ page = page })
 	end)
 
 	table.insert(self.pages, page)
 
 	if #self.pages == 1 then
-		self:SelectPage({page = page, toggle = true})
+		self:SelectPage({ page = page, toggle = true })
 	else
 		self:_setTabState(page, false, true)
 	end
 
 	function page:addSection(sectionOptions)
 		sectionOptions = sectionOptions or {}
-		local secTitle = sectionOptions.title or "Section"
+		local secTitle = sanitizeText(sectionOptions.title or "Section")
 
 		local section = {
 			title = secTitle,
@@ -908,7 +1205,7 @@ function curl:addPage(options)
 			AutomaticSize = Enum.AutomaticSize.Y,
 			Parent = pageFrame
 		})
-		addCorner(secFrame, 8)
+		addCorner(ui, secFrame, 8)
 
 		local secStroke = make("UIStroke", {
 			Color = ui.theme.Background,
@@ -959,7 +1256,7 @@ function curl:addPage(options)
 				ClipsDescendants = false,
 				Parent = secFrame
 			})
-			addCorner(shell, 7)
+			addCorner(ui, shell, 7)
 
 			local stroke = make("UIStroke", {
 				Color = ui.theme.Background,
@@ -974,6 +1271,10 @@ function curl:addPage(options)
 			return shell
 		end
 
+		----------------------------------------------------------------------
+		-- BUTTON
+		----------------------------------------------------------------------
+
 		function section:addButton(btnOptions)
 			btnOptions = btnOptions or {}
 
@@ -985,7 +1286,7 @@ function curl:addPage(options)
 				Size = UDim2.new(1, 0, 0, 38),
 				Parent = secFrame
 			})
-			addCorner(btn, 7)
+			addCorner(ui, btn, 7)
 
 			local stroke = make("UIStroke", {
 				Color = ui.theme.Background,
@@ -997,7 +1298,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, -16, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = btnOptions.title or "Button",
+				Text = sanitizeText(btnOptions.title or "Button"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1011,11 +1312,11 @@ function curl:addPage(options)
 			ui:_bindHover(btn, "DarkContrast", ui.theme.Background)
 
 			ui:_connect(btn.MouseButton1Down, function()
-				tween(btn, {BackgroundColor3 = ui.theme.Accent}, 0.08)
+				tween(btn, { BackgroundColor3 = ui.theme.Accent }, 0.08)
 			end)
 
 			ui:_connect(btn.MouseButton1Up, function()
-				tween(btn, {BackgroundColor3 = ui.theme.DarkContrast}, 0.12)
+				tween(btn, { BackgroundColor3 = ui.theme.DarkContrast }, 0.12)
 			end)
 
 			ui:_connect(btn.MouseButton1Click, function()
@@ -1025,12 +1326,16 @@ function curl:addPage(options)
 			local api = {}
 
 			function api:SetTitle(text)
-				titleLabel.Text = tostring(text)
+				titleLabel.Text = sanitizeText(text)
 			end
 
 			ui:_registerControl(section, btnOptions.title or "Button", btn, "button", btnOptions.keywords)
 			return api
 		end
+
+		----------------------------------------------------------------------
+		-- TOGGLE
+		----------------------------------------------------------------------
 
 		function section:addToggle(togOptions)
 			togOptions = togOptions or {}
@@ -1049,7 +1354,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, -70, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = togOptions.title or "Toggle",
+				Text = sanitizeText(togOptions.title or "Toggle"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1065,7 +1370,7 @@ function curl:addPage(options)
 				Size = UDim2.new(0, 44, 0, 22),
 				Parent = shell
 			})
-			addCorner(switchBack, 100)
+			addCorner(ui, switchBack, 100)
 
 			local switchKnob = make("Frame", {
 				BackgroundColor3 = Color3.fromRGB(255, 255, 255),
@@ -1075,7 +1380,7 @@ function curl:addPage(options)
 				Position = UDim2.new(0, 4, 0.5, 0),
 				Parent = switchBack
 			})
-			addCorner(switchKnob, 100)
+			addCorner(ui, switchKnob, 100)
 
 			ui:registerTheme(titleLabel, "TextColor3", "TextColor")
 			ui:registerTheme(switchBack, "BackgroundColor3", "Background")
@@ -1120,6 +1425,10 @@ function curl:addPage(options)
 			return api
 		end
 
+		----------------------------------------------------------------------
+		-- TEXTBOX
+		----------------------------------------------------------------------
+
 		function section:addTextbox(txtOptions)
 			txtOptions = txtOptions or {}
 
@@ -1129,7 +1438,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(0.42, 0, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = txtOptions.title or "Textbox",
+				Text = sanitizeText(txtOptions.title or "Textbox"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1145,15 +1454,15 @@ function curl:addPage(options)
 				Size = UDim2.new(0.54, 0, 0, 26),
 				Parent = shell
 			})
-			addCorner(inputBack, 6)
+			addCorner(ui, inputBack, 6)
 
 			local box = make("TextBox", {
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, -10, 1, 0),
 				Position = UDim2.new(0, 5, 0, 0),
 				ClearTextOnFocus = txtOptions.clearOnFocus == true,
-				PlaceholderText = txtOptions.placeholder or "",
-				Text = tostring(txtOptions.default or ""),
+				PlaceholderText = sanitizeText(txtOptions.placeholder or ""),
+				Text = sanitizeText(txtOptions.default or ""),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.Gotham,
 				TextSize = 13,
@@ -1180,6 +1489,11 @@ function curl:addPage(options)
 					end
 				end
 
+				local safe = sanitizeText(box.Text)
+				if safe ~= box.Text then
+					box.Text = safe
+				end
+
 				api.Value = box.Text
 
 				if not finishedOnly then
@@ -1188,12 +1502,13 @@ function curl:addPage(options)
 			end)
 
 			ui:_connect(box.FocusLost, function(enterPressed)
-				api.Value = box.Text
+				api.Value = sanitizeText(box.Text)
+				box.Text = api.Value
 				safeCall(txtOptions.callback, api.Value, enterPressed)
 			end)
 
 			function api:SetValue(value, noCallback)
-				box.Text = tostring(value or "")
+				box.Text = sanitizeText(value or "")
 				api.Value = box.Text
 				if not noCallback then
 					safeCall(txtOptions.callback, api.Value, false)
@@ -1204,6 +1519,10 @@ function curl:addPage(options)
 			return api
 		end
 
+		----------------------------------------------------------------------
+		-- KEYBIND
+		----------------------------------------------------------------------
+
 		function section:addKeybind(keyOptions)
 			keyOptions = keyOptions or {}
 
@@ -1213,7 +1532,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(0.52, 0, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = keyOptions.title or "Keybind",
+				Text = sanitizeText(keyOptions.title or "Keybind"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1231,7 +1550,7 @@ function curl:addPage(options)
 				Text = "",
 				Parent = shell
 			})
-			addCorner(bindButton, 6)
+			addCorner(ui, bindButton, 6)
 
 			local bindText = make("TextLabel", {
 				BackgroundTransparency = 1,
@@ -1312,6 +1631,10 @@ function curl:addPage(options)
 			return api
 		end
 
+		----------------------------------------------------------------------
+		-- SLIDER
+		----------------------------------------------------------------------
+
 		function section:addSlider(slOptions)
 			slOptions = slOptions or {}
 
@@ -1330,7 +1653,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(0.65, 0, 0, 18),
 				Position = UDim2.new(0, 12, 0, 8),
-				Text = slOptions.title or "Slider",
+				Text = sanitizeText(slOptions.title or "Slider"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1356,7 +1679,7 @@ function curl:addPage(options)
 				Size = UDim2.new(1, -24, 0, 6),
 				Parent = shell
 			})
-			addCorner(barBack, 100)
+			addCorner(ui, barBack, 100)
 
 			local barFill = make("Frame", {
 				BackgroundColor3 = ui.theme.Accent,
@@ -1364,7 +1687,7 @@ function curl:addPage(options)
 				Size = UDim2.new(0, 0, 1, 0),
 				Parent = barBack
 			})
-			addCorner(barFill, 100)
+			addCorner(ui, barFill, 100)
 
 			local knob = make("Frame", {
 				BackgroundColor3 = Color3.fromRGB(255, 255, 255),
@@ -1374,7 +1697,7 @@ function curl:addPage(options)
 				Size = UDim2.new(0, 12, 0, 12),
 				Parent = barBack
 			})
-			addCorner(knob, 100)
+			addCorner(ui, knob, 100)
 
 			ui:registerTheme(titleLabel, "TextColor3", "TextColor")
 			ui:registerTheme(valueLabel, "TextColor3", "SubText")
@@ -1427,20 +1750,20 @@ function curl:addPage(options)
 			end
 
 			ui:_connect(barBack.InputBegan, function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					draggingSlider = true
 					updateFromInput(input.Position.X)
 				end
 			end)
 
 			ui:_connect(UserInputService.InputChanged, function(input)
-				if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+				if draggingSlider and (input.UserInputType == Enum.UserInputType.MouseMovement) then
 					updateFromInput(input.Position.X)
 				end
 			end)
 
 			ui:_connect(UserInputService.InputEnded, function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					draggingSlider = false
 				end
 			end)
@@ -1455,6 +1778,10 @@ function curl:addPage(options)
 			ui:_registerControl(section, slOptions.title or "Slider", shell, "slider", slOptions.keywords)
 			return api
 		end
+
+		----------------------------------------------------------------------
+		-- DROPDOWN
+		----------------------------------------------------------------------
 
 		function section:addDropdown(dropOptions)
 			dropOptions = dropOptions or {}
@@ -1480,7 +1807,7 @@ function curl:addPage(options)
 				Size = UDim2.new(1, 0, 0, 38),
 				Parent = shell
 			})
-			addCorner(header, 7)
+			addCorner(ui, header, 7)
 
 			local stroke = make("UIStroke", {
 				Color = ui.theme.Background,
@@ -1492,7 +1819,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(0.45, 0, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = dropOptions.title or "Dropdown",
+				Text = sanitizeText(dropOptions.title or "Dropdown"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1538,7 +1865,7 @@ function curl:addPage(options)
 				Size = UDim2.new(1, 0, 1, 0),
 				Parent = holder
 			})
-			addCorner(listBack, 7)
+			addCorner(ui, listBack, 7)
 
 			local scroll = make("ScrollingFrame", {
 				BackgroundTransparency = 1,
@@ -1585,15 +1912,46 @@ function curl:addPage(options)
 				end
 			end
 
-			local function setOpen(state)
-				open = state
-				local contentHeight = math.min(listLayout.AbsoluteContentSize.Y + 8, 140)
-				tween(holder, {
-					Size = UDim2.new(1, 0, 0, state and contentHeight or 0)
-				}, 0.16)
-				tween(arrow, {
-					Rotation = state and 180 or 0
-				}, 0.16)
+			local function resizeHolder(animated)
+				if not open then
+					if animated then
+						tween(holder, { Size = UDim2.new(1, 0, 0, 0) }, 0.16)
+					else
+						holder.Size = UDim2.new(1, 0, 0, 0)
+					end
+					return
+				end
+
+				local contentHeight = math.min(listLayout.AbsoluteContentSize.Y + 8, 146)
+				if animated then
+					tween(holder, { Size = UDim2.new(1, 0, 0, contentHeight) }, 0.16)
+				else
+					holder.Size = UDim2.new(1, 0, 0, contentHeight)
+				end
+			end
+
+			local function closeDropdown()
+				if not open then
+					return
+				end
+				open = false
+				resizeHolder(true)
+				tween(arrow, { Rotation = 0 }, 0.16)
+
+				if ui._activePopupCloser == closeDropdown then
+					ui._activePopupCloser = nil
+				end
+			end
+
+			local function openDropdown()
+				if ui._activePopupCloser and ui._activePopupCloser ~= closeDropdown then
+					pcall(ui._activePopupCloser)
+				end
+				ui._activePopupCloser = closeDropdown
+
+				open = true
+				resizeHolder(true)
+				tween(arrow, { Rotation = 180 }, 0.16)
 			end
 
 			local function rebuild()
@@ -1613,13 +1971,13 @@ function curl:addPage(options)
 						Size = UDim2.new(1, 0, 0, 26),
 						Parent = scroll
 					})
-					addCorner(optionButton, 6)
+					addCorner(ui, optionButton, 6)
 
 					local optionLabel = make("TextLabel", {
 						BackgroundTransparency = 1,
 						Size = UDim2.new(1, -12, 1, 0),
 						Position = UDim2.new(0, 6, 0, 0),
-						Text = buttonDisplay(value),
+						Text = sanitizeText(buttonDisplay(value)),
 						TextXAlignment = Enum.TextXAlignment.Left,
 						Font = Enum.Font.Gotham,
 						TextSize = 12,
@@ -1629,19 +1987,19 @@ function curl:addPage(options)
 
 					ui:_connect(optionButton.MouseEnter, function()
 						if api.Value ~= value then
-							tween(optionButton, {BackgroundColor3 = ui.theme.LightContrast}, 0.12)
+							tween(optionButton, { BackgroundColor3 = ui.theme.LightContrast }, 0.10)
 						end
 					end)
 
 					ui:_connect(optionButton.MouseLeave, function()
 						if api.Value ~= value then
-							tween(optionButton, {BackgroundColor3 = ui.theme.Background}, 0.12)
+							tween(optionButton, { BackgroundColor3 = ui.theme.Background }, 0.10)
 						end
 					end)
 
 					ui:_connect(optionButton.MouseButton1Click, function()
 						api:SetValue(value)
-						setOpen(false)
+						closeDropdown()
 					end)
 
 					table.insert(buttons, {
@@ -1679,7 +2037,7 @@ function curl:addPage(options)
 				end
 
 				api.Value = value
-				valueLabel.Text = value and buttonDisplay(value) or "-"
+				valueLabel.Text = value and sanitizeText(buttonDisplay(value)) or "-"
 				refreshButtons()
 
 				if not noCallback then
@@ -1688,18 +2046,46 @@ function curl:addPage(options)
 			end
 
 			ui:_connect(header.MouseButton1Click, function()
-				setOpen(not open)
+				if open then
+					closeDropdown()
+				else
+					openDropdown()
+				end
 			end)
 
 			ui:_connect(listLayout:GetPropertyChangedSignal("AbsoluteContentSize"), function()
 				if open then
-					setOpen(true)
+					resizeHolder(true)
+				end
+			end)
+
+			-- close on outside click
+			ui:_connect(UserInputService.InputBegan, function(input, gpe)
+				if gpe or not open then
+					return
+				end
+
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
+					return
+				end
+
+				local pos = input.Position
+
+				local function inBounds(guiObject)
+					local ap = guiObject.AbsolutePosition
+					local as = guiObject.AbsoluteSize
+					return pos.X >= ap.X and pos.Y >= ap.Y and pos.X <= ap.X + as.X and pos.Y <= ap.Y + as.Y
+				end
+
+				if not inBounds(header) and not inBounds(holder) then
+					closeDropdown()
 				end
 			end)
 
 			ui:_addRefresh(function()
 				rebuild()
 				refreshButtons()
+				resizeHolder(false)
 			end)
 
 			rebuild()
@@ -1714,6 +2100,10 @@ function curl:addPage(options)
 			return api
 		end
 
+		----------------------------------------------------------------------
+		-- COLOR PICKER (Obsidian-style HSV + transparency, with OnChanged)
+		----------------------------------------------------------------------
+
 		function section:addColorPicker(cpOptions)
 			cpOptions = cpOptions or {}
 
@@ -1723,7 +2113,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(0.52, 0, 1, 0),
 				Position = UDim2.new(0, 12, 0, 0),
-				Text = cpOptions.title or "Color Picker",
+				Text = sanitizeText(cpOptions.title or "Color Picker"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamMedium,
 				TextSize = 13,
@@ -1741,7 +2131,7 @@ function curl:addPage(options)
 				Text = "",
 				Parent = shell
 			})
-			addCorner(previewButton, 6)
+			addCorner(ui, previewButton, 6)
 
 			local previewFill = make("Frame", {
 				BackgroundColor3 = cpOptions.default or Color3.fromRGB(255, 0, 0),
@@ -1750,7 +2140,7 @@ function curl:addPage(options)
 				Position = UDim2.new(0, 6, 0.5, -7),
 				Parent = previewButton
 			})
-			addCorner(previewFill, 4)
+			addCorner(ui, previewFill, 4)
 
 			local previewText = make("TextLabel", {
 				BackgroundTransparency = 1,
@@ -1779,7 +2169,7 @@ function curl:addPage(options)
 				ZIndex = 50,
 				Parent = ui.main
 			})
-			addCorner(popup, 8)
+			addCorner(ui, popup, 8)
 
 			local popupScale = Instance.new("UIScale")
 			popupScale.Scale = 1
@@ -1795,7 +2185,7 @@ function curl:addPage(options)
 				BackgroundTransparency = 1,
 				Size = UDim2.new(1, -12, 0, 18),
 				Position = UDim2.new(0, 8, 0, 8),
-				Text = cpOptions.title or "Color Picker",
+				Text = sanitizeText(cpOptions.title or "Color Picker"),
 				TextXAlignment = Enum.TextXAlignment.Left,
 				Font = Enum.Font.GothamBold,
 				TextSize = 12,
@@ -1812,7 +2202,7 @@ function curl:addPage(options)
 				ZIndex = 51,
 				Parent = popup
 			})
-			addCorner(svFrame, 6)
+			addCorner(ui, svFrame, 6)
 
 			local satOverlay = make("Frame", {
 				BackgroundColor3 = Color3.new(1, 1, 1),
@@ -1821,7 +2211,7 @@ function curl:addPage(options)
 				ZIndex = 52,
 				Parent = svFrame
 			})
-			addCorner(satOverlay, 6)
+			addCorner(ui, satOverlay, 6)
 
 			local satGrad = Instance.new("UIGradient")
 			satGrad.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1))
@@ -1838,7 +2228,7 @@ function curl:addPage(options)
 				ZIndex = 53,
 				Parent = svFrame
 			})
-			addCorner(valOverlay, 6)
+			addCorner(ui, valOverlay, 6)
 
 			local valGrad = Instance.new("UIGradient")
 			valGrad.Color = ColorSequence.new(Color3.new(0, 0, 0), Color3.new(0, 0, 0))
@@ -1863,7 +2253,7 @@ function curl:addPage(options)
 				Thickness = 1.5,
 				Parent = svCursor
 			})
-			addCorner(svCursor, 100)
+			addCorner(ui, svCursor, 100)
 
 			local hueBar = make("Frame", {
 				BackgroundColor3 = Color3.new(1, 1, 1),
@@ -1873,7 +2263,7 @@ function curl:addPage(options)
 				ZIndex = 51,
 				Parent = popup
 			})
-			addCorner(hueBar, 6)
+			addCorner(ui, hueBar, 6)
 
 			local hueGradient = Instance.new("UIGradient")
 			hueGradient.Rotation = 90
@@ -1897,7 +2287,7 @@ function curl:addPage(options)
 				ZIndex = 54,
 				Parent = hueBar
 			})
-			addCorner(hueCursor, 100)
+			addCorner(ui, hueCursor, 100)
 
 			local alphaLabel
 			local alphaBack
@@ -1919,7 +2309,7 @@ function curl:addPage(options)
 					Parent = popup
 				})
 
-				alphaBack = makeChecker(popup, 182, 12, 6, 51)
+				alphaBack = makeChecker(ui, popup, 182, 12, 6, 51)
 				alphaBack.Position = UDim2.new(0, 10, 0, 216)
 				alphaBack.ZIndex = 51
 
@@ -1930,7 +2320,7 @@ function curl:addPage(options)
 					ZIndex = 52,
 					Parent = alphaBack
 				})
-				addCorner(alphaOverlay, 4)
+				addCorner(ui, alphaOverlay, 4)
 
 				alphaFade = Instance.new("UIGradient")
 				alphaFade.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(1, 1, 1))
@@ -1950,7 +2340,7 @@ function curl:addPage(options)
 					ZIndex = 54,
 					Parent = alphaBack
 				})
-				addCorner(alphaCursor, 100)
+				addCorner(ui, alphaCursor, 100)
 			end
 
 			local infoLabel = make("TextLabel", {
@@ -1977,6 +2367,7 @@ function curl:addPage(options)
 			local api = {}
 			api.Value = cpOptions.default or Color3.fromRGB(255, 0, 0)
 			api.Transparency = transparencyEnabled and math.clamp(tonumber(cpOptions.transparency) or 0, 0, 1) or nil
+			api._changedCallbacks = {}
 
 			local h, s, v = Color3.toHSV(api.Value)
 			local svDragging = false
@@ -1984,11 +2375,21 @@ function curl:addPage(options)
 			local alphaDragging = false
 			local popupOpen = false
 
-			local function fireCallback()
+			local function fireChangedCallbacks()
 				if transparencyEnabled then
 					safeCall(cpOptions.callback, api.Value, api.Transparency)
+					safeCall(cpOptions.Changed, api.Value, api.Transparency)
+					safeCall(cpOptions.changed, api.Value, api.Transparency)
+					for _, cb in ipairs(api._changedCallbacks) do
+						safeCall(cb, api.Value, api.Transparency)
+					end
 				else
 					safeCall(cpOptions.callback, api.Value)
+					safeCall(cpOptions.Changed, api.Value)
+					safeCall(cpOptions.changed, api.Value)
+					for _, cb in ipairs(api._changedCallbacks) do
+						safeCall(cb, api.Value)
+					end
 				end
 			end
 
@@ -2017,7 +2418,7 @@ function curl:addPage(options)
 				end
 
 				if not noCallback then
-					fireCallback()
+					fireChangedCallbacks()
 				end
 			end
 
@@ -2043,7 +2444,7 @@ function curl:addPage(options)
 				end
 
 				popupOpen = false
-				tween(popupScale, {Scale = 0.96}, 0.12)
+				tween(popupScale, { Scale = 0.96 }, 0.12)
 				task.delay(0.12, function()
 					if popup and not popupOpen and not ui._destroyed then
 						popup.Visible = false
@@ -2066,7 +2467,7 @@ function curl:addPage(options)
 				popup.Visible = true
 				popupOpen = true
 				popupScale.Scale = 0.96
-				tween(popupScale, {Scale = 1}, 0.15)
+				tween(popupScale, { Scale = 1 }, 0.15)
 			end
 
 			local function updateSV(inputPos)
@@ -2095,6 +2496,12 @@ function curl:addPage(options)
 				if typeof(color) == "Color3" then
 					h, s, v = Color3.toHSV(color)
 					api.Value = color
+				elseif typeof(color) == "table" then
+					local hh = tonumber(color.H or color.h or color[1]) or 0
+					local ss = tonumber(color.S or color.s or color[2]) or 0
+					local vv = tonumber(color.V or color.v or color[3]) or 0
+					h, s, v = hh, ss, vv
+					api.Value = Color3.fromHSV(h, s, v)
 				end
 
 				if transparencyEnabled and transparency ~= nil then
@@ -2102,6 +2509,17 @@ function curl:addPage(options)
 				end
 
 				refresh(noCallback)
+			end
+
+			-- Obsidian-style helpers
+			function api:SetValueRGB(color, transparency, noCallback)
+				api:SetValue(color, transparency, noCallback)
+			end
+
+			function api:OnChanged(callback)
+				if type(callback) == "function" then
+					table.insert(self._changedCallbacks, callback)
+				end
 			end
 
 			function api:SetTransparency(value, noCallback)
@@ -2128,14 +2546,14 @@ function curl:addPage(options)
 			end)
 
 			ui:_connect(svFrame.InputBegan, function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					svDragging = true
 					updateSV(input.Position)
 				end
 			end)
 
 			ui:_connect(hueBar.InputBegan, function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					hueDragging = true
 					updateHue(input.Position)
 				end
@@ -2143,7 +2561,7 @@ function curl:addPage(options)
 
 			if transparencyEnabled and alphaBack then
 				ui:_connect(alphaBack.InputBegan, function(input)
-					if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+					if input.UserInputType == Enum.UserInputType.MouseButton1 then
 						alphaDragging = true
 						updateAlpha(input.Position)
 					end
@@ -2151,7 +2569,7 @@ function curl:addPage(options)
 			end
 
 			ui:_connect(UserInputService.InputChanged, function(input)
-				if input.UserInputType ~= Enum.UserInputType.MouseMovement and input.UserInputType ~= Enum.UserInputType.Touch then
+				if input.UserInputType ~= Enum.UserInputType.MouseMovement then
 					return
 				end
 
@@ -2165,7 +2583,7 @@ function curl:addPage(options)
 			end)
 
 			ui:_connect(UserInputService.InputEnded, function(input)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
 					svDragging = false
 					hueDragging = false
 					alphaDragging = false
@@ -2177,7 +2595,7 @@ function curl:addPage(options)
 					return
 				end
 
-				if input.UserInputType ~= Enum.UserInputType.MouseButton1 and input.UserInputType ~= Enum.UserInputType.Touch then
+				if input.UserInputType ~= Enum.UserInputType.MouseButton1 then
 					return
 				end
 
@@ -2209,6 +2627,112 @@ function curl:addPage(options)
 	end
 
 	self:RefreshSearch(self.searchQuery)
+	return page
+end
+
+-----------------------------------------------------------------------
+-- Built-in "UI Settings" page (themes, corner roundness, smart clamp)
+-----------------------------------------------------------------------
+
+function curl:CreateSettingsPage(options)
+	if self._hasSettingsPage then
+		return self._settingsPage
+	end
+
+	options = options or {}
+
+	local page = self:addPage({
+		title = options.title or "UI Settings"
+	})
+
+	self._hasSettingsPage = true
+	self._settingsPage = page
+
+	local appearance = page:addSection({ title = "Appearance" })
+	local behavior = page:addSection({ title = "Behavior" })
+
+	-- Theme dropdown
+	local themeNames = {}
+	for name in pairs(self.presetThemes or presetThemes) do
+		table.insert(themeNames, name)
+	end
+	table.sort(themeNames, function(a, b)
+		return a < b
+	end)
+
+	local currentPresetName = "Default"
+
+	local themeDropdown = appearance:addDropdown({
+		title = "Preset Theme",
+		list = themeNames,
+		default = currentPresetName,
+		callback = function(name)
+			if not name or not (self.presetThemes or presetThemes)[name] then
+				return
+			end
+			currentPresetName = name
+			self:ApplyTheme(name)
+		end
+	})
+
+	-- Per-color theme pickers (more configurable than Obsidian's 5)
+	local themePickers = {}
+
+	local function addThemePicker(key, title)
+		local picker = appearance:addColorPicker({
+			title = title,
+			default = self.theme[key] or defaultTheme[key],
+			callback = function(color)
+				self:updateTheme(key, color)
+			end
+		})
+		themePickers[key] = picker
+	end
+
+	addThemePicker("Background", "Background")
+	addThemePicker("Glow", "Glow / Shadow")
+	addThemePicker("Accent", "Accent")
+	addThemePicker("LightContrast", "Panels (Light)")
+	addThemePicker("DarkContrast", "Panels (Dark)")
+	addThemePicker("TextColor", "Text Color")
+	addThemePicker("SubText", "Sub Text")
+
+	-- Corner roundness (0 = sharp, 2 = very round)
+	local cornerSlider = appearance:addSlider({
+		title = "Corner Roundness",
+		min = 0,
+		max = 2,
+		rounding = 2,
+		default = self.cornerScale or 1,
+		callback = function(value)
+			self:SetCornerScale(value)
+		end
+	})
+
+	-- Smart screen clamp toggle
+	behavior:addToggle({
+		title = "Clamp window to screen",
+		default = self.smartScreenClamp,
+		callback = function(state)
+			self.smartScreenClamp = state
+			if state then
+				self:_clampMainToScreen(true)
+			end
+		end
+	})
+
+	-- UI toggle keybind
+	behavior:addKeybind({
+		title = "Toggle UI keybind",
+		key = self._toggleKey or Enum.KeyCode.RightShift,
+		changedCallback = function(newKey)
+			self._toggleKey = newKey or Enum.KeyCode.RightShift
+			if self.topbar and self.topbar:FindFirstChildOfClass("TextLabel") then
+				-- titleLabel is first, hint is second; safer to track directly in new()
+			end
+		end
+	})
+
 	return page
 end
 
